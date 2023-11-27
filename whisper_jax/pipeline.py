@@ -179,9 +179,9 @@ class FlaxWhisperPipline:
             static_argnums=(3,),
         )
 
-    def generate(self, input_features, language=None, task=None, return_timestamps=False):
+    def generate(self, input_features, prompt=None, language=None, task=None, return_timestamps=False):
         forced_decoder_ids = self.get_forced_decoder_ids(
-            language=language, task=task, return_timestamps=return_timestamps
+            prompt=prompt, language=language, task=task, return_timestamps=return_timestamps
         )
         if not self.is_sharded:
             # if we're using pmap we need to manually replicate the input data across devices and gather the output tokens
@@ -196,7 +196,9 @@ class FlaxWhisperPipline:
             ).sequences
         return output_ids
 
-    def get_forced_decoder_ids(self, generation_config=None, task=None, language=None, return_timestamps=False):
+    def get_forced_decoder_ids(
+        self, generation_config=None, prompt=None, task=None, language=None, return_timestamps=False
+    ):
         if generation_config is None:
             generation_config = self.model.generation_config
 
@@ -207,6 +209,11 @@ class FlaxWhisperPipline:
 
         forced_decoder_ids = []
 
+        if prompt is not None:
+            prompt_ids = self.processor.get_prompt_ids(prompt)
+            forced_decoder_ids.append(prompt_ids)
+
+        forced_decoder_ids.append(generation_config.decoder_start_token_id)
         if is_multilingual:
             if language is not None:
                 language = language.lower()
@@ -229,17 +236,18 @@ class FlaxWhisperPipline:
                     raise ValueError(
                         f"Unsupported language: {language}. Language should be one of:" f" {acceptable_languages}."
                     )
-                forced_decoder_ids.append((1, generation_config.lang_to_id[language_token]))
+                forced_decoder_ids.append(generation_config.lang_to_id[language_token])
 
             if task is not None:
-                forced_decoder_ids.append((2, generation_config.task_to_id[task]))
+                forced_decoder_ids.append(generation_config.task_to_id[task])
             else:
-                forced_decoder_ids.append((2, generation_config.task_to_id["transcribe"]))
+                forced_decoder_ids.append(generation_config.task_to_id["transcribe"])
 
         if not return_timestamps:
-            if forced_decoder_ids and forced_decoder_ids[-1][0] != generation_config.no_timestamps_token_id:
-                idx = forced_decoder_ids[-1][0] + 1 if forced_decoder_ids else 1
-                forced_decoder_ids.append((idx, generation_config.no_timestamps_token_id))
+            if forced_decoder_ids and forced_decoder_ids[-1] != generation_config.no_timestamps_token_id:
+                forced_decoder_ids.append(generation_config.no_timestamps_token_id)
+
+        forced_decoder_ids = [(rank + 1, token) for rank, token in enumerate(forced_decoder_ids)]
 
         return forced_decoder_ids
 
@@ -396,7 +404,7 @@ class FlaxWhisperPipline:
         )
         return {"text": text, **optional}
 
-    def forward(self, model_inputs, batch_size=None, language=None, task=None, return_timestamps=False):
+    def forward(self, model_inputs, batch_size=None, prompt=None, language=None, task=None, return_timestamps=False):
         # We need to keep track of some additional input arguments for post-processing so need to forward these on after running generation
         input_features = model_inputs.pop("input_features")
         input_batch_size = input_features.shape[0]
@@ -405,9 +413,9 @@ class FlaxWhisperPipline:
             padding = np.zeros([batch_size - input_batch_size, *input_features.shape[1:]], input_features.dtype)
             input_features = np.concatenate([input_features, padding])
 
-        pred_ids = self.generate(input_features, language=language, task=task, return_timestamps=return_timestamps)[
-            :input_batch_size
-        ]
+        pred_ids = self.generate(
+            input_features, prompt=prompt, language=language, task=task, return_timestamps=return_timestamps
+        )[:input_batch_size]
 
         # tokenizer's decode method expects an extra dim - we insert it here for convenience
         out = {"tokens": pred_ids[:, None, :]}
@@ -424,6 +432,7 @@ class FlaxWhisperPipline:
         chunk_length_s=30.0,
         stride_length_s=None,
         batch_size=None,
+        prompt=None,
         language=None,
         task=None,
         return_timestamps=None,
@@ -498,7 +507,12 @@ class FlaxWhisperPipline:
         for batch in dataloader:
             model_outputs.append(
                 self.forward(
-                    batch, batch_size=batch_size, language=language, task=task, return_timestamps=return_timestamps
+                    batch,
+                    batch_size=batch_size,
+                    prompt=prompt,
+                    language=language,
+                    task=task,
+                    return_timestamps=return_timestamps,
                 )
             )
         post_processed = self.postprocess(model_outputs, return_timestamps=return_timestamps)

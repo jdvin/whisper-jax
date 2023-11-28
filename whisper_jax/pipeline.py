@@ -211,7 +211,7 @@ class FlaxWhisperPipline:
 
         if prompt is not None:
             prompt_ids = self.processor.get_prompt_ids(prompt)
-            forced_decoder_ids.append(prompt_ids)
+            forced_decoder_ids.extend(prompt_ids)
 
         forced_decoder_ids.append(generation_config.decoder_start_token_id)
         if is_multilingual:
